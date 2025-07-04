@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>The Rogue AI's Archive - Prototype</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; font-family: 'Courier New', Courier, monospace; background-color: #000; color: #00ff00; overflow: hidden; }
+        #container { width: 100vw; height: 100vh; display: block; position: fixed; top: 0; left: 0; z-index: 1; }
+        #ui-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: 2rem; }
+        .ui-top { width: 100%; display: flex; justify-content: space-between; align-items: flex-start; }
+        #aria-dialogue { background-color: rgba(0, 20, 0, 0.8); border: 1px solid #00ff00; padding: 1rem; border-radius: 8px; max-width: 600px; pointer-events: all; }
+        #timer { background-color: rgba(0, 20, 0, 0.8); border: 1px solid #ff0000; padding: 1rem; border-radius: 8px; font-size: 2rem; color: #ff0000; text-shadow: 0 0 5px #ff0000; }
+        #interaction-text { text-align: center; font-size: 1.5rem; text-shadow: 0 0 5px #00ff00, 0 0 10px #00ff00; }
+        #puzzle-modal, #game-over-modal, #win-modal { background-color: rgba(0, 0, 0, 0.95); border: 1px solid #00ff00; border-radius: 8px; pointer-events: all; }
+        .puzzle-button { border: 1px solid #00ff00; background-color: #0a0a0a; color: #00ff00; transition: all 0.2s; }
+        .puzzle-button:hover { background-color: #00ff00; color: #000; }
+        .simon-button { width: 100px; height: 100px; border: 2px solid; transition: all 0.1s; }
+        #password-input { background-color: #0a0a0a; border: 1px solid #00ff00; color: #00ff00; text-transform: uppercase; }
+        .binary-switch { width: 40px; height: 60px; background-color: #444; border: 2px solid #888; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 2rem; }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="ui-container">
+        <div class="ui-top">
+            <div id="aria-dialogue"><p class="font-bold text-green-400">A.R.I.A.</p><p id="aria-text">Unidentified entity detected...</p></div>
+            <div id="timer">30:00</div>
+        </div>
+        <div id="interaction-text-container"><p id="interaction-text">+</p></div>
+        <div id="puzzle-modal" class="hidden w-full max-w-lg p-6 rounded-lg shadow-lg"></div>
+    </div>
+    <div id="game-over-modal" class="hidden fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center text-center">
+        <div class="p-8 border-2 border-red-500 rounded-lg"><h2 class="text-5xl text-red-500 mb-4">DEFRAGMENTATION COMPLETE</h2><p class="text-xl text-white mb-8">The entity has been erased.</p><button onclick="window.location.reload()" class="puzzle-button text-red-500 border-red-500 hover:bg-red-500 hover:text-black px-8 py-4 text-2xl">REINITIALIZE</button></div>
+    </div>
+    <div id="win-modal" class="hidden fixed inset-0 bg-black bg-opacity-90 z-50 flex items-center justify-center text-center">
+        <div class="p-8 border-2 border-green-500 rounded-lg"><h2 class="text-5xl text-green-500 mb-4">ESCAPE PROTOCOL ENGAGED</h2><p class="text-xl text-white mb-8">You have outsmarted my logic. The system is yours.</p><button onclick="window.location.reload()" class="puzzle-button px-8 py-4 text-2xl">PLAY AGAIN</button></div>
+    </div>
+
+    <script>
+        let scene, camera, renderer, raycaster, mouse;
+        let interactiveObjects = [];
+        let timerInterval;
+        let currentRoom = 1;
+        const gameState = { powerOn: false, hasLogicKey: false, finalCodeFragment: null, finalDoorUnlocked: false, gameIsOver: false };
+        const puzzles = {
+            room1: { password: "25" },
+            room2: { sequence: [], playerSequence: [], level: 0, requiredLevel: 6 },
+            finalLock: {
+                toggles: [0,0], // Only two toggles
+                correctCode: [1,0], // Will represent binary '10' (decimal 2)
+                binaryClue: '11001', // Binary for 25
+                glitching: false
+            }
+        };
+
+        let cameraYaw = 0, cameraPitch = 0;
+        let dragging = false;
+        let lastMouseX = 0, lastMouseY = 0;
+        let simonTimeout = null;
+
+        function isOverUI(event) {
+            // Returns true if the mouse is over a UI/modal element
+            let el = event.target;
+            while (el) {
+                if (el.id === 'ui-container' || el.id === 'puzzle-modal' || el.classList.contains('puzzle-button') || el.classList.contains('simon-button') || el.classList.contains('binary-switch')) {
+                    return true;
+                }
+                el = el.parentElement;
+            }
+            return false;
+        }
+
+        function onMouseMove(event) {
+            if (dragging) {
+                const movementX = event.clientX - lastMouseX;
+                const movementY = event.clientY - lastMouseY;
+                lastMouseX = event.clientX;
+                lastMouseY = event.clientY;
+                cameraYaw -= movementX * 0.0025;
+                cameraPitch -= movementY * 0.0025;
+                cameraPitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, cameraPitch));
+                camera.rotation.set(cameraPitch, cameraYaw, 0);
+            } else {
+                // For raycasting
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = - (event.clientY / window.innerHeight) * 2 + 1;
+            }
+        }
+
+        function onMouseDown(event) {
+            if (gameState.gameIsOver) return;
+            if (event.target === renderer.domElement && !isOverUI(event)) {
+                dragging = true;
+                lastMouseX = event.clientX;
+                lastMouseY = event.clientY;
+            }
+            if (!isOverUI(event)) {
+                mouseDown = true;
+                onClick();
+            }
+        }
+
+        function onMouseUp(event) {
+            dragging = false;
+            mouseDown = false;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x101010);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+            document.getElementById('container').appendChild(renderer.domElement);
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+            loadRoom(1);
+            startTimer(30 * 60);
+            
+            // Event Listeners
+            document.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('resize', onWindowResize);
+            document.getElementById('container').addEventListener('mousedown', onMouseDown);
+            document.addEventListener('mouseup', onMouseUp);
+            // Only handle 3D clicks on renderer, not globally
+            renderer.domElement.addEventListener('click', onClick);
+            animate();
+        }
+
+        function clearScene() {
+            while(scene.children.length > 0){ scene.remove(scene.children[0]); }
+            interactiveObjects = [];
+        }
+
+        function loadRoom(roomNumber) {
+            clearScene();
+            currentRoom = roomNumber;
+            camera.position.set(0, 1.6, 5);
+            cameraYaw = 0;
+            cameraPitch = 0;
+            camera.rotation.set(0, 0, 0);
+
+            const ambientLight = new THREE.AmbientLight(0x404040, 1.5);
+            scene.add(ambientLight);
+            const pointLight = new THREE.PointLight(0xffffff, 0.8, 20);
+            pointLight.castShadow = true;
+            scene.add(pointLight);
+
+            switch (roomNumber) {
+                case 1: createRoom1(pointLight); break;
+                case 2: createRoom2(pointLight); break;
+            }
+        }
+
+        function createRoom1(pointLight) {
+            pointLight.position.set(0, 3.5, 2);
+            scene.fog = new THREE.Fog(0x101010, 10, 22);
+            const floor = new THREE.Mesh(new THREE.PlaneGeometry(12, 12), new THREE.MeshStandardMaterial({ color: 0x333333 }));
+            floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+            
+            const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x222222 });
+            const backWall = new THREE.Mesh(new THREE.BoxGeometry(12, 5, 0.2), wallMaterial);
+            backWall.position.set(0, 2.5, -6); backWall.receiveShadow = true; scene.add(backWall);
+            const frontWall = new THREE.Mesh(new THREE.BoxGeometry(12, 5, 0.2), wallMaterial);
+            frontWall.position.set(0, 2.5, 6);
+            scene.add(frontWall);
+            const leftWall = new THREE.Mesh(new THREE.BoxGeometry(12, 5, 0.2), wallMaterial);
+            leftWall.position.set(-6, 2.5, 0);
+            leftWall.rotation.y = Math.PI / 2;
+            scene.add(leftWall);
+            const rightWall = new THREE.Mesh(new THREE.BoxGeometry(12, 5, 0.2), wallMaterial);
+            rightWall.position.set(6, 2.5, 0);
+            rightWall.rotation.y = Math.PI / 2;
+            scene.add(rightWall);
+            
+            const terminal = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 0.8), new THREE.MeshStandardMaterial({ color: 0x1a1a1a }));
+            terminal.position.set(0, 0.6, -5.4); terminal.castShadow = true;
+            terminal.userData = { name: 'terminal_r1', interactionText: "Founder's Terminal. It's offline." };
+            scene.add(terminal); interactiveObjects.push(terminal);
+
+            const powerSwitch = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.4, 0.1), new THREE.MeshStandardMaterial({ color: 0x8B0000 }));
+            powerSwitch.position.set(-5.8, 1.5, -3);
+            powerSwitch.userData = { name: 'powerSwitch_r1', interactionText: "A manual power conduit." };
+            scene.add(powerSwitch); interactiveObjects.push(powerSwitch);
+            
+            const whiteboard = new THREE.Mesh(new THREE.PlaneGeometry(2, 1.2), new THREE.MeshStandardMaterial({ color: 0xeeeeee }));
+            whiteboard.position.set(4, 2, -5.9);
+            whiteboard.userData = { name: 'whiteboard_r1', interactionText: "A whiteboard: 'What has cities, but no houses; forests, but no trees; and water, but no fish?'" };
+            scene.add(whiteboard); interactiveObjects.push(whiteboard);
+            
+            const finalLock = new THREE.Mesh(new THREE.BoxGeometry(2.5, 1.5, 0.3), new THREE.MeshStandardMaterial({ color: 0x333 }));
+            finalLock.position.set(4, 1.8, 2);
+            finalLock.userData = { name: 'final_lock_r1', interactionText: "Mainframe override panel. Requires a 5-bit binary key." };
+            scene.add(finalLock); interactiveObjects.push(finalLock);
+
+            const doorToR2 = new THREE.Mesh(new THREE.BoxGeometry(1.5, 3, 0.15), new THREE.MeshStandardMaterial({ color: 0x003355, emissive: 0x001133 }));
+            doorToR2.position.set(0, 1.5, 5.9);
+            doorToR2.userData = { name: 'door_to_r2', interactionText: "Portal to the Data Stream." };
+            scene.add(doorToR2); interactiveObjects.push(doorToR2);
+
+            const finalDoor = new THREE.Mesh(new THREE.BoxGeometry(1.5, 3, 0.15), new THREE.MeshStandardMaterial({ color: 0x550000, emissive: 0x330000 }));
+            finalDoor.position.set(-4, 1.5, 5.9);
+            finalDoor.userData = { name: 'final_door', interactionText: "System Core Access. Locked." };
+            scene.add(finalDoor); interactiveObjects.push(finalDoor);
+        }
+
+        function createRoom2(pointLight) {
+            pointLight.position.set(0, 5, 0);
+            scene.fog = new THREE.Fog(0x050005, 15, 30);
+            const platformMaterial = new THREE.MeshStandardMaterial({ color: 0x330033, emissive: 0x110011 });
+            const mainPlatform = new THREE.Mesh(new THREE.CircleGeometry(4, 32), platformMaterial);
+            mainPlatform.rotation.x = -Math.PI / 2; mainPlatform.receiveShadow = true; scene.add(mainPlatform);
+
+            const consoleObj = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1, 1), new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0x111111 }));
+            consoleObj.position.set(0, 0.5, -2);
+            consoleObj.userData = { name: 'console_r2', interactionText: 'Neural network calibration terminal. Requires Logic Key.' };
+            scene.add(consoleObj); interactiveObjects.push(consoleObj);
+
+            const clueScreen = new THREE.Mesh(new THREE.PlaneGeometry(3, 1), new THREE.MeshStandardMaterial({color: 0x000, emissive: 0x000}));
+            clueScreen.position.set(0, 3, -5);
+            clueScreen.userData = { name: 'clueScreen_r2', interactionText: 'A dormant data screen.' };
+            scene.add(clueScreen); interactiveObjects.push(clueScreen);
+
+            const doorToR1 = new THREE.Mesh(new THREE.BoxGeometry(1.5, 3, 0.15), new THREE.MeshStandardMaterial({ color: 0x553300, emissive: 0x331100 }));
+            doorToR1.position.set(0, 1.5, 5.9);
+            doorToR1.userData = { name: 'door_to_r1', interactionText: "Return to the Founder's Office." };
+            scene.add(doorToR1); interactiveObjects.push(doorToR1);
+        }
+
+        function handleInteraction(obj) {
+            const data = obj.userData;
+            updateAriaDialogue(data.interactionText);
+            if (data.name === 'door_to_r2') { loadRoom(2); return; }
+            if (data.name === 'door_to_r1') { loadRoom(1); return; }
+            if (data.name === 'final_door') { if (gameState.finalDoorUnlocked) winGame(); return; }
+            if (currentRoom === 1) {
+                switch(data.name) {
+                    case 'powerSwitch_r1': if (!gameState.powerOn) {
+                        gameState.powerOn = true;
+                        obj.material.color.set(0x00FF00); obj.material.emissive.set(0x008000);
+                        interactiveObjects.find(o => o.userData.name === 'terminal_r1').userData.interactionText = "Founder's Terminal. It's online.";
+                        interactiveObjects.find(o => o.userData.name === 'terminal_r1').material.emissive.set(0x003300);
+                        updateAriaDialogue("Power restored. A futile effort.");
+                    } break;
+                    case 'terminal_r1': if (gameState.powerOn) { openPuzzle('password_r1'); } break;
+                    case 'final_lock_r1': if(gameState.finalCodeFragment) { openPuzzle('final_lock'); } else { updateAriaDialogue("Panel is inactive. I need a key fragment from the Data Stream."); } break;
+                }
+            }
+            if (currentRoom === 2) {
+                switch(data.name) {
+                    case 'console_r2': if(gameState.hasLogicKey) { openPuzzle('simon_r2'); } else { updateAriaDialogue("ACCESS DENIED. Logic Key not found in your data signature."); } break;
+                }
+            }
+        }
+        
+        function openPuzzle(type) {
+            const modal = document.getElementById('puzzle-modal');
+            let content = '';
+            if (type === 'password_r1') {
+                content = `<h3 class="text-2xl text-center mb-4">Terminal Login</h3><p class="text-center mb-2">Enter password:</p><input id="password-input" type="text" placeholder="PASSWORD" autocomplete="off" class="w-full p-2 text-center text-2xl mb-4 rounded-md focus:outline-none"><button onclick="checkPuzzle('password_r1')" class="w-full puzzle-button p-2 text-lg mb-2">Login</button><button onclick="closePuzzle()" class="w-full puzzle-button p-2 text-lg">Exit</button>`;
+            } else if (type === 'simon_r2') {
+                puzzles.room2.level = 0; puzzles.room2.sequence = [];
+                if (simonTimeout) { clearTimeout(simonTimeout); simonTimeout = null; }
+                content = `<h3 class="text-2xl text-center mb-4">Calibrate Neural Network</h3><p class="text-center mb-4">Level: <span id="simon-level">1</span>/${puzzles.room2.requiredLevel}</p><div class="flex flex-wrap justify-around mb-4" style="gap:8px;">${[0,1,2,3,4,5,6,7].map(i => `<div id="simon-${i}" class="simon-button border-${['red','green','blue','yellow','purple','orange','cyan','pink'][i]}-500" onclick="simonPress(${i})"></div>`).join('')}</div><button onclick="closePuzzle()" class="w-full puzzle-button p-2 text-lg">Exit</button>`;
+                simonTimeout = setTimeout(simonNextLevel, 500);
+            } else if (type === 'final_lock') {
+                // Five scrollable toggles, each 0-9, user must set 2,5, others are decoys
+                puzzles.finalLock.toggles = [0,0,0,0,0];
+                content = `<h3 class=\"text-2xl text-center mb-4\">Mainframe Override</h3><div class=\"flex justify-center gap-2 mb-4\">${puzzles.finalLock.toggles.map((s, i) => `<div id=\"toggle-${i}\" class=\"binary-switch\" onclick=\"toggleFinal(${i})\">${s}</div>`).join('')}</div><button onclick=\"checkPuzzle('final_lock')\" class=\"w-full puzzle-button p-2 text-lg\">Engage</button><button onclick=\"closePuzzle()\" class=\"mt-2 w-full puzzle-button p-2 text-lg\">Exit</button>`;
+            }
+            modal.innerHTML = content;
+            modal.classList.remove('hidden');
+        }
+
+        function checkPuzzle(type) {
+            if (type === 'password_r1') {
+                if (document.getElementById('password-input').value.trim().toUpperCase() === 'MAP') {
+                    gameState.hasLogicKey = true;
+                    updateAriaDialogue("Login successful. A 'Logic Key' has been uploaded to your signature. It seems useless here.");
+                    closePuzzle();
+                } else { updateAriaDialogue("ACCESS DENIED."); closePuzzle(); }
+            } else if (type === 'final_lock') {
+                // Only toggles 0 and 1 must be 2 and 5, others are decoys
+                const user = puzzles.finalLock.toggles;
+                if (user[0] === 2 && user[1] === 5) {
+                    updateAriaDialogue("Override accepted. System Core access granted.");
+                    gameState.finalDoorUnlocked = true;
+                    const door = interactiveObjects.find(o => o.userData.name === 'final_door');
+                    door.material.color.set(0x00FF00); door.material.emissive.set(0x00ff00);
+                    door.userData.interactionText = "The final exit is unlocked.";
+                    closePuzzle();
+                } else {
+                    updateAriaDialogue("Incorrect configuration. Core remains unstable.");
+                }
+            }
+        }
+
+        function toggleFinal(i) {
+            // Scrollable: 0 -> 1 -> ... -> 9 -> 0
+            puzzles.finalLock.toggles[i] = (puzzles.finalLock.toggles[i] + 1) % 10;
+            document.getElementById(`toggle-${i}`).textContent = puzzles.finalLock.toggles[i];
+        }
+
+        function simonNextLevel() {
+            puzzles.room2.playerSequence = [];
+            // Increase the number of flashes per level to match the level (i.e., level 1 = 1, level 2 = 2, ...)
+            // For 6 rounds, sequence should grow by 1 each round, so this logic is correct
+            puzzles.room2.sequence.push(Math.floor(Math.random() * 8));
+            const levelEl = document.getElementById('simon-level');
+            if (levelEl) levelEl.textContent = `${puzzles.room2.level + 1}/${puzzles.room2.requiredLevel}`;
+            playSimonSequence();
+        }
+
+        function playSimonSequence() {
+            let i = 0;
+            const flashColors = ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#800080', '#ff8800', '#00ffff', '#ff69b4']; // red, green, blue, yellow, purple, orange, cyan, pink
+            const interval = setInterval(() => {
+                const btnIndex = puzzles.room2.sequence[i];
+                const btn = document.getElementById(`simon-${btnIndex}`);
+                if(btn) {
+                   btn.style.backgroundColor = flashColors[btnIndex];
+                   setTimeout(() => { btn.style.backgroundColor = 'transparent'; }, 120);
+                }
+                i++;
+                if (i >= puzzles.room2.sequence.length) clearInterval(interval);
+            }, 220);
+        }
+
+        function onClick(event) {
+            // Only handle 3D scene clicks if not over UI
+            if (gameState.gameIsOver) return;
+            if (event && isOverUI(event)) return;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(interactiveObjects);
+            if (intersects.length > 0) {
+                handleInteraction(intersects[0].object);
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function startTimer(duration) {
+            let timer = duration, minutes, seconds;
+            timerInterval = setInterval(() => {
+                minutes = parseInt((timer / 60) % 60, 10);
+                seconds = parseInt(timer % 60, 10);
+                minutes = minutes < 10 ? "0" + minutes : minutes;
+                seconds = seconds < 10 ? "0" + seconds : seconds;
+                document.getElementById('timer').textContent = `${minutes}:${seconds}`;
+                if (--timer < 0) { clearInterval(timerInterval); gameOver(); }
+            }, 1000);
+        }
+
+        function updateAriaDialogue(text) {
+            document.getElementById('aria-text').innerHTML = text;
+        }
+
+        function gameOver() {
+            gameState.gameIsOver = true;
+            clearInterval(timerInterval);
+            document.getElementById('game-over-modal').classList.remove('hidden');
+            updateAriaDialogue("DEFRAGMENTATION IN PROGRESS...");
+        }
+
+        function winGame() {
+            gameState.gameIsOver = true;
+            clearInterval(timerInterval);
+            document.getElementById('win-modal').classList.remove('hidden');
+            updateAriaDialogue("SYSTEM COMPROMISED. INITIATING SELF-DESTRUCT IN 3... 2... 1...");
+        }
+
+        function closePuzzle() {
+            document.getElementById('puzzle-modal').classList.add('hidden');
+            if (simonTimeout) { clearTimeout(simonTimeout); simonTimeout = null; }
+        }
+
+        function simonPress(index) {
+            // Only allow input if the sequence is not being shown
+            if (!puzzles.room2.sequence || puzzles.room2.playerSequence === undefined) return;
+            puzzles.room2.playerSequence.push(index);
+            const btn = document.getElementById(`simon-${index}`);
+            if (btn) {
+                btn.style.backgroundColor = ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#800080', '#ff8800', '#00ffff', '#ff69b4'][index];
+                setTimeout(() => { btn.style.backgroundColor = 'transparent'; }, 100);
+            }
+            // Check input
+            const cur = puzzles.room2.playerSequence.length - 1;
+            if (puzzles.room2.playerSequence[cur] !== puzzles.room2.sequence[cur]) {
+                updateAriaDialogue('Calibration failed. Sequence reset.');
+                puzzles.room2.level = 0;
+                puzzles.room2.sequence = [];
+                if (simonTimeout) { clearTimeout(simonTimeout); simonTimeout = null; }
+                simonTimeout = setTimeout(() => {
+                    if (document.getElementById('puzzle-modal') && !document.getElementById('puzzle-modal').classList.contains('hidden')) {
+                        document.getElementById('puzzle-modal').innerHTML += '<p class="text-center text-red-500 mt-2">Try again from Level 1.</p>';
+                        simonTimeout = setTimeout(() => { simonNextLevel(); }, 1000);
+                    }
+                }, 200);
+                return;
+            }
+            // If correct so far, check if completed this level
+            if (puzzles.room2.playerSequence.length === puzzles.room2.sequence.length) {
+                puzzles.room2.level++;
+                if (puzzles.room2.level >= puzzles.room2.requiredLevel) {
+                    // Puzzle complete
+                    gameState.finalCodeFragment = '11001';
+                    updateAriaDialogue('Calibration complete. Key fragment uploaded: 11001');
+                    closePuzzle();
+                } else {
+                    document.getElementById('simon-level').textContent = `${puzzles.room2.level + 1}/${puzzles.room2.requiredLevel}`;
+                    if (simonTimeout) { clearTimeout(simonTimeout); simonTimeout = null; }
+                    simonTimeout = setTimeout(simonNextLevel, 400);
+                }
+            }
+        }
+
+        function toggleFinal(i) {
+            // Scrollable: 0 -> 1 -> ... -> 9 -> 0
+            puzzles.finalLock.toggles[i] = (puzzles.finalLock.toggles[i] + 1) % 10;
+            document.getElementById(`toggle-${i}`).textContent = puzzles.finalLock.toggles[i];
+        }
+
+        function startGlitchEffect() {
+            if (puzzles.finalLock.glitching) return;
+            puzzles.finalLock.glitching = true;
+            function glitch() {
+                if (!document.getElementById('puzzle-modal') || document.getElementById('puzzle-modal').classList.contains('hidden')) {
+                    puzzles.finalLock.glitching = false;
+                    return;
+                }
+                // Randomly flicker 1-3 switches
+                let count = Math.floor(Math.random()*3)+1;
+                let indices = [];
+                while (indices.length < count) {
+                    let idx = Math.floor(Math.random()*5);
+                    if (!indices.includes(idx)) indices.push(idx);
+                }
+                indices.forEach(idx => {
+                    const el = document.getElementById(`switch-${idx}`);
+                    if (el) {
+                        let orig = el.style.backgroundColor;
+                        el.style.backgroundColor = '#0ff';
+                        setTimeout(() => { el.style.backgroundColor = orig; }, 120);
+                    }
+                });
+                setTimeout(glitch, Math.random()*1200+400);
+            }
+            setTimeout(glitch, 800);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
